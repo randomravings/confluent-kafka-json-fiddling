@@ -1,23 +1,24 @@
 package io.confluent;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.confluent.kafka.schemaregistry.ParsedSchema;
+import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
+import io.confluent.kafka.schemaregistry.client.SchemaMetadata;
+import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
+import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException;
+import io.confluent.kafka.schemaregistry.json.JsonSchema;
+import io.confluent.kafka.schemaregistry.json.JsonSchemaUtils;
 import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
-import io.confluent.kafka.schemaregistry.ParsedSchema;
-import io.confluent.kafka.schemaregistry.client.CachedSchemaRegistryClient;
-import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException;
-import io.confluent.kafka.schemaregistry.json.JsonSchema;
-import io.confluent.kafka.schemaregistry.json.JsonSchemaUtils;
-import org.apache.kafka.clients.producer.ProducerConfig;
-import org.apache.kafka.clients.producer.Producer;
 import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.Producer;
+import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.kafka.common.errors.SerializationException;
 import org.apache.kafka.common.errors.WakeupException;
 
@@ -43,19 +44,24 @@ public class Main {
         // Some helper classes.
         final Random random = new Random();
         final ObjectMapper mapper = new ObjectMapper();
+        final SchemaRegistryClient client = new CachedSchemaRegistryClient(SCHEMA_REGISTRY_URL, 10);
 
         // Producers will share topic which is not a recommended pattern in general.
         final String topic = "test-topic";
         final String subject = String.format("%s-value", topic);
 
-        // Create a JsonNode instance containing desired schema
-        final JsonNode jsonSchema = mapper.readTree(SCHEMA);
-
-        // Try to register schema if not exists.
-        final SchemaRegistryClient client = new CachedSchemaRegistryClient(SCHEMA_REGISTRY_URL, 10);
+        // Ensure that the schema we expect is deployed.
         final ParsedSchema parsedSchema = new JsonSchema(SCHEMA);
         final int version = client.register(subject, parsedSchema);
         System.out.println(String.format("Registered subject: %s schema id: %d", subject, version));
+        System.out.println(String.format("Registered raw schema text: %s", parsedSchema.rawSchema()));
+
+        // Lookup schema as it is deployed (can differ syntactically from deployed version)
+        final SchemaMetadata schemaMetadata = client.getSchemaMetadata(subject, -1);
+        final String schemaString = schemaMetadata.getSchema();
+        final JsonNode jsonSchema = mapper.readTree(schemaString);
+        System.out.println(String.format("Retrieved version: %d", schemaMetadata.getVersion()));
+        System.out.println(String.format("Retrieved raw schema text: %s", schemaMetadata.getSchema()));
 
         // Create a producer that expects the User data as a POJO.
         final Producer<String, User> pojoProducer = createPojoProducer();
@@ -185,6 +191,7 @@ public class Main {
         props.put(ConsumerConfig.GROUP_ID_CONFIG, group);
         props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, STRING_DESERIALIZER);
         props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, JSON_DESERIALIZER);
+        props.put(ConsumerConfig.METRICS_RECORDING_LEVEL_CONFIG, "INFO");
         props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         props.put("schema.registry.url", SCHEMA_REGISTRY_URL);
         return props;
@@ -196,9 +203,6 @@ public class Main {
         @JsonProperty
         public int points;
 
-        public User() {
-        }
-
         public User(String name, int points) {
             this.name = name;
             this.points = points;
@@ -206,6 +210,34 @@ public class Main {
     }
 
     // The schemas are extremely sensitive, a slight change could break compatibility
-    private static final String SCHEMA =
-            "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"User\",\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"name\":{\"oneOf\":[{\"type\":\"null\",\"title\":\"Not included\"},{\"type\":\"string\"}]},\"points\":{\"type\":\"integer\"}},\"required\":[\"points\"]}";
+    // private static final String SCHEMA =
+    //        "{\"$schema\":\"http://json-schema.org/draft-07/schema#\",\"title\":\"User\",\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"name\":{\"oneOf\":[{\"type\":\"null\",\"title\":\"Not included\"},{\"type\":\"string\"}]},\"points\":{\"type\":\"integer\"}},\"required\":[\"points\"]}";
+    private static final String SCHEMA = """
+    {
+        "$schema":"http://json-schema.org/draft-07/schema#",
+        "title":"User",
+        "type":"object",
+        "additionalProperties":false,
+        "properties": {
+            "name": {
+                "oneOf": [
+                    {
+                        "type": "null",
+                        "title":"Not included"
+                    },
+                    {
+                        "type":"string"
+                    }
+                ]
+            },
+            "points": {
+                "type": "integer"
+            }
+        },
+        "required": [
+            "points"
+        ]
+    }
+    """;
+            
 }
